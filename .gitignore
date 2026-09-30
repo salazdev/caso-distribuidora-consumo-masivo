@@ -1,0 +1,13 @@
+# Se regeneran corriendo los scripts
+datos/procesados/
+
+# Archivos temporales
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# Documento con la clave de respuestas
+brief_completo.md
+
+# Credenciales (MySQL en la Fase 3)
+.env
