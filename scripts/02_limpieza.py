@@ -96,9 +96,50 @@ print(f"  SKU comodín marcados: {ventas['sku_comodin'].sum():,}")
 print(f"  Cliente comodín marcados: {ventas['cliente_comodin'].sum():,}")
 
 # ==================================================
+# PRODUCTOS
+# ==================================================
+print("\n== PRODUCTOS ==")
+print(f"  Filas recibidas: {len(productos):,}")
+
+# 1. Categorías: 19 escrituras -> 5 categorías reales (tabla explícita, auditable)
+CATEGORIAS = {
+    "BEBIDAS": "Bebidas", "Bebidas": "Bebidas", "bebidas": "Bebidas", "Bebida": "Bebidas",
+    "SNACKS": "Snacks", "Snacks": "Snacks", "snack": "Snacks", "Snaks": "Snacks",
+    "ASEO": "Aseo", "Aseo": "Aseo", "aseo": "Aseo", "Aseo Hogar": "Aseo",
+    "ABARROTES": "Abarrotes", "Abarrotes": "Abarrotes", "abarrote": "Abarrotes",
+    "LACTEOS": "Lácteos", "Lacteos": "Lácteos", "lacteos": "Lácteos", "Lácteos": "Lácteos",
+}
+sin_mapa = set(productos["categoria"]) - set(CATEGORIAS)
+assert not sin_mapa, f"Categorías sin mapear: {sin_mapa}"
+productos["categoria"] = productos["categoria"].map(CATEGORIAS)
+print(f"  Categorías unificadas: {productos['categoria'].nunique()}")
+
+# 2. Precio de lista vacío: se recupera del historial de ventas (dato real, no estimado)
+sin_precio = productos["precio_lista"].isna()
+productos.loc[sin_precio, "precio_lista"] = productos.loc[sin_precio, "sku"].map(precio_historial)
+productos["precio_desde_ventas"] = sin_precio
+assert productos["precio_lista"].notna().all(), "Quedaron productos sin precio"
+print(f"  Precios de lista recuperados desde ventas: {sin_precio.sum():,}")
+
+# 3. Costo en cero: ESTIMADO con la relación costo/precio mediana de su categoría
+#    (no existe fuente con el costo real; se marca y se reporta)
+con_costo = productos["costo_unitario"] > 0
+relacion = (productos[con_costo]
+            .assign(r=lambda d: d["costo_unitario"] / d["precio_lista"])
+            .groupby("categoria")["r"].median())
+sin_costo = ~con_costo
+productos.loc[sin_costo, "costo_unitario"] = (
+    productos.loc[sin_costo, "precio_lista"]
+    * productos.loc[sin_costo, "categoria"].map(relacion)).round(0)
+productos["costo_imputado"] = sin_costo
+assert productos["costo_unitario"].gt(0).all(), "Quedaron costos en cero"
+print(f"  Costos estimados por categoría (marcados): {sin_costo.sum():,}")
+
+# ==================================================
 # GUARDAR
 # ==================================================
 ventas.to_csv(PROCESADOS / "ventas_limpias.csv", index=False)
 dev_desde_ventas.to_csv(PROCESADOS / "devoluciones_desde_ventas.csv", index=False)
+productos.to_csv(PROCESADOS / "productos_limpios.csv", index=False)
 pd.concat(descartados).to_csv(SALIDAS / "descartados.csv", index=False)
 print(f"\nListo. Descartados totales: {sum(len(d) for d in descartados):,}")
