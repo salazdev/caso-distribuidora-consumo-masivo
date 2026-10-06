@@ -77,6 +77,23 @@ dev_desde_ventas["origen"] = "ventas.csv (cantidad negativa)"
 ventas = ventas[~es_dev].copy()
 print(f"  Devoluciones separadas a su propia tabla: {len(dev_desde_ventas):,}")
 print(f"  Ventas que siguen: {len(ventas):,}")
+# 4. Precios en cero: se imputan desde el catálogo; si el catálogo no tiene
+#    precio, desde el historial de ventas del mismo SKU (precio venta = precio lista)
+productos = pd.read_csv(CRUDOS / "productos.csv")
+precio_historial = ventas[ventas["precio_unitario"] > 0].groupby("sku")["precio_unitario"].median()
+precio_ref = productos.set_index("sku")["precio_lista"].fillna(precio_historial)
+
+en_cero = ventas["precio_unitario"] == 0
+ventas.loc[en_cero, "precio_unitario"] = ventas.loc[en_cero, "sku"].map(precio_ref)
+ventas["precio_imputado"] = en_cero
+assert ventas["precio_unitario"].gt(0).all(), "Quedaron precios en cero o vacíos"
+print(f"  Precios en cero imputados: {en_cero.sum():,}")
+
+# 5. Claves comodín: se marcan, no se borran
+ventas["sku_comodin"] = ventas["sku"] == "SKU-0000"
+ventas["cliente_comodin"] = ventas["id_cliente"] == "C-99999"
+print(f"  SKU comodín marcados: {ventas['sku_comodin'].sum():,}")
+print(f"  Cliente comodín marcados: {ventas['cliente_comodin'].sum():,}")
 
 # ==================================================
 # GUARDAR
