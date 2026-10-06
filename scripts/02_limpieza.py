@@ -69,9 +69,19 @@ print(f"  Fechas ambiguas marcadas: {ventas['fecha_ambigua'].sum():,}")
 print(f"  Rango: {ventas['fecha'].min().date()} a {ventas['fecha'].max().date()}")
 print(f"  Filas que siguen: {len(ventas):,}")
 
+# 3. Devoluciones cargadas como venta negativa: se separan, no se borran
+es_dev = ventas["cantidad"] < 0
+dev_desde_ventas = ventas[es_dev].copy()
+dev_desde_ventas["cantidad"] = -dev_desde_ventas["cantidad"]   # se guardan en positivo
+dev_desde_ventas["origen"] = "ventas.csv (cantidad negativa)"
+ventas = ventas[~es_dev].copy()
+print(f"  Devoluciones separadas a su propia tabla: {len(dev_desde_ventas):,}")
+print(f"  Ventas que siguen: {len(ventas):,}")
+
 # ==================================================
 # GUARDAR
 # ==================================================
 ventas.to_csv(PROCESADOS / "ventas_limpias.csv", index=False)
+dev_desde_ventas.to_csv(PROCESADOS / "devoluciones_desde_ventas.csv", index=False)
 pd.concat(descartados).to_csv(SALIDAS / "descartados.csv", index=False)
 print(f"\nListo. Descartados totales: {sum(len(d) for d in descartados):,}")
