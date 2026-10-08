@@ -4,6 +4,7 @@ Ejecutar desde la carpeta andina:   python scripts/02_limpieza.py
 Lee datos/crudos/ (sin modificarlos) y escribe en datos/procesados/ y salidas/.
 """
 from pathlib import Path
+import json
 import pandas as pd
 from herramientas_perfilado import clasificar_fecha
 
@@ -233,13 +234,93 @@ print(f"  Ventas reasignadas al cliente conservado: {reasignadas.sum():,}")
 validos = set(clientes["id_cliente"]) | {"C-99999"}
 assert ventas["id_cliente"].isin(validos).all(), "Hay ventas con clientes que no existen"
 assert clientes["nit"].is_unique, "Quedaron NIT repetidos"
-print(f"  Clientes únicos finales: {len(clientes):,}")   
+print(f"  Clientes únicos finales: {len(clientes):,}")
+# ==================================================
+# DEVOLUCIONES
+# ==================================================
+print("\n== DEVOLUCIONES ==")
+devoluciones = pd.read_csv(CRUDOS / "devoluciones.csv")
+print(f"  Filas recibidas: {len(devoluciones):,}")
+
+# 1. Fechas: misma lógica que ventas
+devoluciones["tipo_fecha"] = devoluciones["fecha"].apply(clasificar_fecha)
+devoluciones = descartar(devoluciones, devoluciones["tipo_fecha"] == "inválida", "devoluciones", "Fecha imposible")
+texto_dev = devoluciones["fecha"]
+devoluciones["fecha"] = pd.concat(
+    [pd.to_datetime(texto_dev[devoluciones["tipo_fecha"] == t], format=f) for t, f in FORMATOS.items()])
+corregir_dev = (devoluciones["tipo_fecha"] == "barra: ambigua") & (devoluciones["fecha"] > FECHA_MAX)
+devoluciones.loc[corregir_dev, "fecha"] = pd.to_datetime(texto_dev[corregir_dev], format="%m/%d/%Y")
+devoluciones["fecha_ambigua"] = (devoluciones["tipo_fecha"] == "barra: ambigua") & ~corregir_dev
+devoluciones = devoluciones.drop(columns="tipo_fecha")
+assert devoluciones["fecha"].notna().all() and devoluciones["fecha"].max() <= FECHA_MAX
+print(f"  Fechas ambiguas marcadas: {devoluciones['fecha_ambigua'].sum():,}")
+
+# 2. Motivos: 7 escrituras -> 5 motivos reales (diccionario construido en la Fase 2)
+MOTIVOS = {
+    "Vencido": "Vencido",
+    "No solicitado": "No solicitado",
+    "averiado": "Producto averiado",
+    "Producto averiado": "Producto averiado",
+    "PRODUCTO AVERIADO": "Producto averiado",
+    "Error de despacho": "Error de despacho",
+    "Empaque defectuoso": "Empaque defectuoso",
+}
+sin_mapa = set(devoluciones["motivo"]) - set(MOTIVOS)
+assert not sin_mapa, f"Motivos sin mapear: {sin_mapa}"
+devoluciones["motivo"] = devoluciones["motivo"].map(MOTIVOS)
+print(f"  Motivos unificados: {devoluciones['motivo'].nunique()}")
+
+# 3. Unir con las devoluciones que venían en ventas como cantidad negativa
+devoluciones["origen"] = "devoluciones.csv"
+dev_desde_ventas["motivo"] = "Sin motivo (cargada como venta negativa)"
+dev_desde_ventas["id_devolucion"] = "DEV-V" + dev_desde_ventas["folio"].astype(str)
+devoluciones = pd.concat(
+    [devoluciones, dev_desde_ventas[["id_devolucion", "fecha", "id_cliente", "sku", "cantidad",
+                                     "motivo", "fecha_ambigua", "origen"]]],
+    ignore_index=True)
+
+# 4. Clientes duplicados -> código conservado; claves comodín marcadas
+devoluciones["id_cliente"] = devoluciones["id_cliente"].replace(mapa_ids)
+devoluciones["sku_comodin"] = devoluciones["sku"] == "SKU-0000"
+devoluciones["cliente_comodin"] = devoluciones["id_cliente"] == "C-99999"
+assert devoluciones["id_cliente"].isin(validos).all(), "Devoluciones con clientes que no existen"
+print(f"  Devoluciones totales (archivo + ventas negativas): {len(devoluciones):,}")
+
+# ==================================================
+# VISITAS
+# ==================================================
+print("\n== VISITAS ==")
+with open(CRUDOS / "visitas_ruta.json", encoding="utf-8") as f:
+    visitas = pd.json_normalize(json.load(f))
+visitas.columns = [c.split(".")[-1] if c.startswith(("resultado.", "geo.")) else c.replace(".", "_")
+                   for c in visitas.columns]
+print(f"  Filas recibidas: {len(visitas):,}")
+
+visitas["fecha"] = pd.to_datetime(visitas["fecha"], format="%Y-%m-%d")
+assert visitas["fecha"].max() <= FECHA_MAX
+
+# 1. Ruta: la tabla de vendedores es la fuente de verdad; la de la app se conserva aparte
+vendedores = pd.read_excel(CRUDOS / "vendedores.xlsx")
+visitas = visitas.rename(columns={"vendedor_ruta": "ruta_app"})
+visitas["ruta"] = visitas["vendedor_id"].map(vendedores.set_index("id_vendedor")["ruta"])
+print(f"  Visitas con ruta de la app distinta a la del vendedor: {(visitas['ruta'] != visitas['ruta_app']).sum():,}")
+
+# 2. Visitas no efectivas sin motivo: se marcan, no se borran
+sin_motivo = ~visitas["efectiva"] & visitas["motivo_no_venta"].isna()
+visitas.loc[sin_motivo, "motivo_no_venta"] = "Sin motivo registrado"
+print(f"  No efectivas sin motivo (marcadas): {sin_motivo.sum():,}")
+
+# 3. Clientes duplicados -> código conservado
+visitas["cliente_id"] = visitas["cliente_id"].replace(mapa_ids)
+assert visitas["cliente_id"].isin(validos).all(), "Visitas con clientes que no existen"
+print(f"  Filas que siguen: {len(visitas):,}")   
 
 # ==================================================
 # GUARDAR
 # ==================================================
 ventas.to_csv(PROCESADOS / "ventas_limpias.csv", index=False)
-dev_desde_ventas.to_csv(PROCESADOS / "devoluciones_desde_ventas.csv", index=False)
+devoluciones.to_csv(PROCESADOS / "devoluciones_limpias.csv", index=False)
+visitas.to_csv(PROCESADOS / "visitas_limpias.csv", index=False)
 productos.to_csv(PROCESADOS / "productos_limpios.csv", index=False)
 clientes.to_csv(PROCESADOS / "clientes_limpios.csv", index=False)
 mapa_ids.rename("id_conservado").to_csv(PROCESADOS / "mapa_clientes_duplicados.csv")
