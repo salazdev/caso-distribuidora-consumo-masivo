@@ -134,6 +134,106 @@ productos.loc[sin_costo, "costo_unitario"] = (
 productos["costo_imputado"] = sin_costo
 assert productos["costo_unitario"].gt(0).all(), "Quedaron costos en cero"
 print(f"  Costos estimados por categoría (marcados): {sin_costo.sum():,}")
+# ==================================================
+# CLIENTES - parte A: normalizar (la deduplicación va en la parte B)
+# ==================================================
+print("\n== CLIENTES ==")
+clientes = pd.read_excel(CRUDOS / "clientes.xlsx", dtype=str)
+print(f"  Filas recibidas: {len(clientes):,}")
+
+# 1. Duplicados exactos (filas idénticas)
+clientes = descartar(clientes, clientes.duplicated(), "clientes", "Duplicado exacto")
+
+# 2. NIT: solo dígitos; base de 9 dígitos + dígito de verificación aparte
+digitos = clientes["nit"].str.replace(r"\D", "", regex=True)
+clientes["nit"] = digitos.str[:9]
+clientes["nit_dv"] = digitos.str[9:].replace("", pd.NA)
+assert clientes["nit"].str.len().eq(9).all(), "Hay NIT que no quedaron de 9 dígitos"
+print(f"  NIT normalizados: {clientes['nit'].nunique():,} distintos")
+
+# 3. Razón social: mayúsculas, sin espacios dobles, sufijo societario unificado
+rs = (clientes["razon_social"].str.upper()
+      .str.replace(r"\s+", " ", regex=True).str.strip())
+rs = rs.str.replace(r"\s*S\.?A\.?S\.?$", " SAS", regex=True)
+rs = rs.str.replace(r"\s*LTDA\.?$", " LTDA", regex=True)
+clientes["razon_social"] = rs
+print(f"  Razones sociales distintas: {clientes['razon_social'].nunique():,}")
+
+# 4. Ciudad: diccionario construido en la Fase 2 (24 escrituras -> 7 ciudades)
+CIUDADES = {
+    "Pereira": "Pereira", "PEREIRA": "Pereira", "pereira": "Pereira",
+    "Pereria": "Pereira", "Perera": "Pereira",
+    "Santa Rosa de Cabal": "Santa Rosa de Cabal", "Sta Rosa de Cabal": "Santa Rosa de Cabal",
+    "SANTA ROSA": "Santa Rosa de Cabal",
+    "Dosquebradas": "Dosquebradas", "DOSQUEBRADAS": "Dosquebradas",
+    "Dosquebrdas": "Dosquebradas", "Dos Quebradas": "Dosquebradas",
+    "Manizales": "Manizales", "MANIZALES": "Manizales", "Manizalez": "Manizales",
+    "Armenia": "Armenia", "ARMENIA": "Armenia", "Armenía": "Armenia",
+    "Cartago": "Cartago", "CARTAGO": "Cartago", "Cartago Valle": "Cartago",
+    "La Virginia": "La Virginia", "LA VIRGINIA": "La Virginia", "Lavirginia": "La Virginia",
+}
+sin_mapa = set(clientes["ciudad"]) - set(CIUDADES)
+assert not sin_mapa, f"Ciudades sin mapear: {sin_mapa}"
+clientes["ciudad"] = clientes["ciudad"].map(CIUDADES)
+print(f"  Ciudades: {clientes['ciudad'].nunique()}")
+
+# 5. Teléfono: solo dígitos, sin el indicativo 57, 10 dígitos
+tel = clientes["telefono"].str.replace(r"\D", "", regex=True)
+tel = tel.str.replace(r"^57(?=\d{10}$)", "", regex=True)
+clientes["telefono"] = tel.where(tel.str.len() == 10)
+print(f"  Teléfonos válidos: {clientes['telefono'].notna().sum():,} | vacíos: {clientes['telefono'].isna().sum():,}")
+
+# 6. Email: 'å' -> '@', minúsculas, y los múltiples se separan en dos columnas
+con_a = clientes["email"].str.contains("å", na=False)
+em = clientes["email"].str.replace("å", "@", regex=False).str.lower()
+partes_email = em.str.split(r"\s*\|\s*", expand=True, regex=True)
+clientes["email"] = partes_email[0]
+clientes["email_2"] = partes_email[1]
+assert clientes["email"].dropna().str.contains("@").all(), "Hay emails sin @"
+print(f"  Emails corregidos (å por @): {con_a.sum():,}")
+print(f"  Emails con segundo correo separado: {clientes['email_2'].notna().sum():,}")
+
+# 7. Fecha de alta: misma lógica que ventas (ambiguas como día/mes; si cae en el futuro, era mes/día)
+clientes["tipo_fecha"] = clientes["fecha_alta"].apply(clasificar_fecha)
+texto_alta = clientes["fecha_alta"]
+clientes["fecha_alta"] = pd.concat(
+    [pd.to_datetime(texto_alta[clientes["tipo_fecha"] == t], format=f) for t, f in FORMATOS.items()])
+corregir_alta = (clientes["tipo_fecha"] == "barra: ambigua") & (clientes["fecha_alta"] > FECHA_MAX)
+clientes.loc[corregir_alta, "fecha_alta"] = pd.to_datetime(texto_alta[corregir_alta], format="%m/%d/%Y")
+clientes["fecha_alta_ambigua"] = (clientes["tipo_fecha"] == "barra: ambigua") & ~corregir_alta
+clientes = clientes.drop(columns="tipo_fecha")
+assert clientes["fecha_alta"].notna().all(), "Quedaron fechas de alta sin convertir"
+print(f"  Fechas de alta ambiguas marcadas: {clientes['fecha_alta_ambigua'].sum():,}")
+
+clientes["cupo_credito"] = clientes["cupo_credito"].astype(int)
+print(f"  Filas que siguen: {len(clientes):,}")
+# ==================================================
+# CLIENTES - parte B: deduplicar por NIT y reasignar ventas
+# ==================================================
+# Regla: 1) mismo NIT = mismo cliente  2) más campos llenos  3) más ventas
+#        4) id_cliente menor (desempate fijo para que el resultado sea reproducible)
+clientes["campos_llenos"] = clientes[["telefono", "email", "direccion"]].notna().sum(axis=1)
+clientes["n_ventas"] = clientes["id_cliente"].map(ventas["id_cliente"].value_counts()).fillna(0).astype(int)
+
+clientes = clientes.sort_values(["nit", "campos_llenos", "n_ventas", "id_cliente"],
+                                ascending=[True, False, False, True])
+clientes["id_conservado"] = clientes.groupby("nit")["id_cliente"].transform("first")
+duplicado = clientes["id_cliente"] != clientes["id_conservado"]
+mapa_ids = clientes.loc[duplicado].set_index("id_cliente")["id_conservado"]
+
+clientes = descartar(clientes, duplicado, "clientes", "Duplicado lógico (mismo NIT)")
+clientes = clientes.drop(columns=["campos_llenos", "n_ventas", "id_conservado"]).sort_values("id_cliente")
+
+# Reasignar las ventas y devoluciones de los registros descartados al registro conservado
+reasignadas = ventas["id_cliente"].isin(mapa_ids.index)
+ventas["id_cliente"] = ventas["id_cliente"].replace(mapa_ids)
+dev_desde_ventas["id_cliente"] = dev_desde_ventas["id_cliente"].replace(mapa_ids)
+print(f"  Ventas reasignadas al cliente conservado: {reasignadas.sum():,}")
+
+validos = set(clientes["id_cliente"]) | {"C-99999"}
+assert ventas["id_cliente"].isin(validos).all(), "Hay ventas con clientes que no existen"
+assert clientes["nit"].is_unique, "Quedaron NIT repetidos"
+print(f"  Clientes únicos finales: {len(clientes):,}")   
 
 # ==================================================
 # GUARDAR
@@ -141,5 +241,7 @@ print(f"  Costos estimados por categoría (marcados): {sin_costo.sum():,}")
 ventas.to_csv(PROCESADOS / "ventas_limpias.csv", index=False)
 dev_desde_ventas.to_csv(PROCESADOS / "devoluciones_desde_ventas.csv", index=False)
 productos.to_csv(PROCESADOS / "productos_limpios.csv", index=False)
+clientes.to_csv(PROCESADOS / "clientes_limpios.csv", index=False)
+mapa_ids.rename("id_conservado").to_csv(PROCESADOS / "mapa_clientes_duplicados.csv")
 pd.concat(descartados).to_csv(SALIDAS / "descartados.csv", index=False)
 print(f"\nListo. Descartados totales: {sum(len(d) for d in descartados):,}")
